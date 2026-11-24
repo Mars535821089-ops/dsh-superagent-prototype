@@ -207,6 +207,49 @@ it('lets a worker go on after a passing provider failure, three times, before it
   fail(busy)
   await vi.waitFor(() => expect(latestAssignment(ticket())?.report).toMatchObject({ state: 'failed', summary: expect.stringContaining('Service Unavailable') }))
 })
+it('preserves a ready PR report after a same-turn provider error', async () => {
+  const one = await h.acceptedTicket(feishu('1', '@bot 修一'))
+  h.runtime.engine.bindThread(one.ticket.id, { source: 'github', id: '7' }, true)
+  await h.runTool(one.sessionId, 'orchestrator_report', { state: 'ready', summary: 'PR #7 is ready' })
+  await h.runtime.idle()
+  const ticket = () => h.runtime.store.tickets.get(one.ticket.id)!
+  expect(latestAssignment(ticket())?.report).toMatchObject({ state: 'ready', summary: 'PR #7 is ready' })
+  expect(ticket().ended).toBeUndefined() // A followed PR keeps the ticket open for review.
+  const agent = h.agents.get(one.sessionId)!
+  const error = Object.assign(new Error('model returned a completed response with no content'), { code: 'EMPTY_RESPONSE' })
+  h.ctx.emit('agent/error', { agent, turn: 1, step: 18, error } as never)
+  await h.runtime.idle()
+  expect(latestAssignment(ticket())?.report).toMatchObject({ state: 'ready', summary: 'PR #7 is ready' })
+})
+
+it('surfaces an error when new delivered work supersedes a ready report', async () => {
+  const one = await h.acceptedTicket(feishu('1', '@bot 修一'))
+  h.runtime.engine.bindThread(one.ticket.id, { source: 'github', id: '7' }, true)
+  await h.runTool(one.sessionId, 'orchestrator_report', { state: 'ready', summary: 'PR #7 is ready' })
+  const ticket = h.runtime.store.tickets.get(one.ticket.id)!
+  const assignment = latestAssignment(ticket)!
+  assignment.deliveredAt = new Date(Date.parse(assignment.report!.at) + 1000).toISOString()
+  h.runtime.store.tickets.save(ticket)
+  const agent = h.agents.get(one.sessionId)!
+  h.ctx.emit('agent/error', { agent, turn: 2, step: 1, error: new Error('New work failed') } as never)
+  await h.runtime.idle()
+  expect(latestAssignment(h.runtime.store.tickets.get(one.ticket.id)!)?.report)
+    .toMatchObject({ state: 'failed', summary: expect.stringContaining('New work failed') })
+})
+
+it('surfaces an error in a later person-initiated turn after a ready report', async () => {
+  const one = await h.acceptedTicket(feishu('1', '@bot 修一'))
+  h.runtime.engine.bindThread(one.ticket.id, { source: 'github', id: '7' }, true)
+  await h.runTool(one.sessionId, 'orchestrator_report', { state: 'ready', summary: 'PR #7 is ready' })
+  await new Promise(resolve => setTimeout(resolve, 5))
+  const agent = h.agents.get(one.sessionId)!
+  h.ctx.emit('agent/inbox/claimed', { agent, message: { id: 'person', role: 'user', content: [], source: { kind: 'user' } }, turn: 2 } as never)
+  h.ctx.emit('agent/error', { agent, turn: 2, step: 1, error: new Error('Person turn failed') } as never)
+  await h.runtime.idle()
+  expect(latestAssignment(h.runtime.store.tickets.get(one.ticket.id)!)?.report)
+    .toMatchObject({ state: 'failed', summary: expect.stringContaining('Person turn failed') })
+})
+
 describe('a worker that goes on after a passing failure', () => {
   const busy = () => Object.assign(new Error('Service Unavailable'), { status: 503 })
   const told = (sessionId: string) => h.deliveries.mock.calls.map(([call]) => call)

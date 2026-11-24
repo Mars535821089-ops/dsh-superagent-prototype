@@ -506,6 +506,16 @@ export class DshExecutor implements Executor {
       const ticket = this.ticketOf(agent)
       const assignment = ticket && runningAssignment(ticket)
       if (!ticket || !assignment || !liveTicket(ticket) || this.host.closing()) return
+      // A PR may keep its ticket open after the worker has reported ready. A later
+      // model error in that same turn is real, but it must not replace the durable
+      // ready report with failed or retry work that has already been delivered.
+      const report = assignment.report
+      const person = this.personal.get(ticket.id)
+      const newWork = !!report && ((!!assignment.deliveredAt && assignment.deliveredAt >= report.at) || (!!person && person > report.at))
+      if (report?.state === 'ready' && !newWork) {
+        ctx.logger.warn('dsh-superagent: model failed after a ready report on ticket %s: %s', ticket.id, String(error))
+        return
+      }
       if (this.retries(assignment.id, error)) { this.resumeAfter(ticket.id, assignment.id, error); return }
       void this.background(Promise.resolve().then(() => { this.failed(ticket.id, String(error)) }))
     }))
